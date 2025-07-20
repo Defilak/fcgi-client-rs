@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use fastcgi_client::{request::Request, Client, Params};
+use fcgi_client::{request::Request, Client, Params};
 use std::{env::current_dir, time::Duration};
 use tokio::{net::TcpStream, time::timeout};
 

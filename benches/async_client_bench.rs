@@ -12,16 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(test)]
-
-extern crate test;
-
-use fastcgi_client::{conn::KeepAlive, request::Request, Client, Params};
+use criterion::{criterion_group, criterion_main, Criterion};
+use std::hint::black_box;
+use fcgi_client::{conn::KeepAlive, request::Request, Client, Params};
 use std::env::current_dir;
-use test::Bencher;
 use tokio::{
     io::{self, AsyncRead, AsyncWrite},
     net::TcpStream,
+    runtime::Runtime,
 };
 
 mod common;
@@ -47,7 +45,7 @@ async fn test_client<S: AsyncRead + AsyncWrite + Unpin>(client: &mut Client<S, K
         .remote_port(12345)
         .server_addr("127.0.0.1")
         .server_port(80)
-        .server_name("jmjoy-pc")
+        .server_name("rust-fastcgi-bench")
         .content_type("")
         .content_length(0);
 
@@ -56,31 +54,30 @@ async fn test_client<S: AsyncRead + AsyncWrite + Unpin>(client: &mut Client<S, K
         .await
         .unwrap();
 
-    let stdout = String::from_utf8(output.stdout.unwrap_or(Default::default())).unwrap();
+    let stdout = String::from_utf8(output.stdout.unwrap_or_default()).unwrap();
     assert!(stdout.contains("Content-type: text/html; charset=UTF-8"));
     assert!(stdout.contains("\r\n\r\n"));
     assert!(stdout.contains("hello"));
     assert_eq!(output.stderr, None);
 }
 
-#[bench]
-fn bench_execute(b: &mut Bencher) {
+fn bench_execute(c: &mut Criterion) {
     common::setup();
 
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(6)
-        .enable_all()
-        .build()
-        .unwrap();
+    let rt = Runtime::new().expect("Failed to create Tokio runtime");
 
-    let mut client = rt.block_on(async {
-        let stream = TcpStream::connect(("127.0.0.1", 9000)).await.unwrap();
-        Client::new_keep_alive(stream)
-    });
-
-    b.iter(|| {
-        rt.block_on(async {
-            test_client(&mut client).await;
+    c.bench_function("fastcgi_execute", |b| {
+        b.to_async(&rt).iter(|| async {
+            // Создаем новый клиент для каждого запуска
+            let stream = TcpStream::connect(("127.0.0.1", 9000))
+                .await
+                .expect("Failed to connect to FastCGI server on 127.0.0.1:9000");
+            let mut client = Client::new_keep_alive(stream);
+            
+            black_box(test_client(&mut client).await);
         });
     });
 }
+
+criterion_group!(benches, bench_execute);
+criterion_main!(benches);
