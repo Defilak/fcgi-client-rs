@@ -19,14 +19,18 @@
 //! The client can execute requests and receive responses or response streams.
 
 use crate::{
+    ClientError, ClientResult, Response,
     conn::{KeepAlive, Mode, ShortConn},
     meta::{BeginRequestRec, EndRequestRec, Header, ParamPairs, RequestType, Role},
     params::Params,
     request::Request,
     response::ResponseStream,
-    ClientError, ClientResult, Response,
 };
-use std::marker::PhantomData;
+use bytes::BytesMut;
+use std::{
+    marker::PhantomData,
+    ops::{Deref, DerefMut},
+};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tracing::debug;
 
@@ -54,7 +58,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<S, ShortConn> {
     /// Send request and receive response from fastcgi server, under short
     /// connection mode.
     pub async fn execute_once<I: AsyncRead + Unpin>(
-        mut self, request: Request<'_, I>,
+        mut self,
+        request: Request<'_, I>,
     ) -> ClientResult<Response> {
         self.inner_execute(request).await
     }
@@ -87,7 +92,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<S, ShortConn> {
     /// }
     /// ```
     pub async fn execute_once_stream<I: AsyncRead + Unpin>(
-        mut self, request: Request<'_, I>,
+        mut self,
+        request: Request<'_, I>,
     ) -> ClientResult<ResponseStream<S>> {
         Self::handle_request(&mut self.stream, REQUEST_ID, request.params, request.stdin).await?;
         Ok(ResponseStream::new(self.stream, REQUEST_ID))
@@ -107,7 +113,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<S, KeepAlive> {
     /// Send request and receive response from fastcgi server, under keep alive
     /// connection mode.
     pub async fn execute<I: AsyncRead + Unpin>(
-        &mut self, request: Request<'_, I>,
+        &mut self,
+        request: Request<'_, I>,
     ) -> ClientResult<Response> {
         self.inner_execute(request).await
     }
@@ -143,7 +150,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Client<S, KeepAlive> {
     /// }
     /// ```
     pub async fn execute_stream<I: AsyncRead + Unpin>(
-        &mut self, request: Request<'_, I>,
+        &mut self,
+        request: Request<'_, I>,
     ) -> ClientResult<ResponseStream<&mut S>> {
         Self::handle_request(&mut self.stream, REQUEST_ID, request.params, request.stdin).await?;
         Ok(ResponseStream::new(&mut self.stream, REQUEST_ID))
@@ -157,7 +165,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin, M: Mode> Client<S, M> {
     ///
     /// * `request` - The request to execute
     async fn inner_execute<I: AsyncRead + Unpin>(
-        &mut self, request: Request<'_, I>,
+        &mut self,
+        request: Request<'_, I>,
     ) -> ClientResult<Response> {
         Self::handle_request(&mut self.stream, REQUEST_ID, request.params, request.stdin).await?;
         Self::handle_response(&mut self.stream, REQUEST_ID).await
@@ -172,9 +181,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin, M: Mode> Client<S, M> {
     /// * `params` - The request parameters
     /// * `body` - The request body stream
     async fn handle_request<'a, I: AsyncRead + Unpin>(
-        stream: &mut S, id: u16, params: Params<'a>, mut body: I,
+        stream: &mut S,
+        id: u16,
+        params: Params<'a>,
+        mut body: I,
     ) -> ClientResult<()> {
         Self::handle_request_start(stream, id).await?;
+
         Self::handle_request_params(stream, id, params).await?;
         Self::handle_request_body(stream, id, &mut body).await?;
         Self::handle_request_flush(stream).await?;
@@ -190,10 +203,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin, M: Mode> Client<S, M> {
     async fn handle_request_start(stream: &mut S, id: u16) -> ClientResult<()> {
         debug!(id, "Start handle request");
 
-        let begin_request_rec =
-            BeginRequestRec::new(id, Role::Responder, <M>::is_keep_alive()).await?;
+        let begin_request_rec = BeginRequestRec::new(id, Role::Responder, <M>::is_keep_alive());
 
-        debug!(id, ?begin_request_rec, "Send to stream.");
+        //debug!(id, ?begin_request_rec, "Send to stream.");
 
         begin_request_rec.write_to_stream(stream).await?;
 
@@ -208,16 +220,18 @@ impl<S: AsyncRead + AsyncWrite + Unpin, M: Mode> Client<S, M> {
     /// * `id` - The request ID
     /// * `params` - The request parameters
     async fn handle_request_params<'a>(
-        stream: &mut S, id: u16, params: Params<'a>,
+        stream: &mut S,
+        id: u16,
+        params: Params<'a>,
     ) -> ClientResult<()> {
         let param_pairs = ParamPairs::new(params);
-        debug!(id, ?param_pairs, "Params will be sent.");
+        debug!(id, "Params will be sent {param_pairs:#?}.");
 
         Header::write_to_stream_batches(
             RequestType::Params,
             id,
             stream,
-            &mut &param_pairs.to_content().await?[..],
+            &mut param_pairs.to_content().as_ref(),
             Some(|header| {
                 debug!(id, ?header, "Send to stream for Params.");
                 header
@@ -248,7 +262,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin, M: Mode> Client<S, M> {
     /// * `id` - The request ID
     /// * `body` - The request body stream
     async fn handle_request_body<I: AsyncRead + Unpin>(
-        stream: &mut S, id: u16, body: &mut I,
+        stream: &mut S,
+        id: u16,
+        body: &mut I,
     ) -> ClientResult<()> {
         Header::write_to_stream_batches(
             RequestType::Stdin,
@@ -297,8 +313,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin, M: Mode> Client<S, M> {
     async fn handle_response(stream: &mut S, id: u16) -> ClientResult<Response> {
         let mut response = Response::default();
 
-        let mut stderr = Vec::new();
-        let mut stdout = Vec::new();
+        let mut stderr = BytesMut::new();
+        let mut stdout = BytesMut::new();
 
         loop {
             let header = Header::new_from_stream(stream).await?;
@@ -309,10 +325,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin, M: Mode> Client<S, M> {
 
             match header.r#type {
                 RequestType::Stdout => {
-                    stdout.extend(header.read_content_from_stream(stream).await?);
+                    stdout.extend_from_slice(&header.read_content_from_stream(stream).await?);
                 }
                 RequestType::Stderr => {
-                    stderr.extend(header.read_content_from_stream(stream).await?);
+                    stderr.extend_from_slice(&header.read_content_from_stream(stream).await?);
                 }
                 RequestType::EndRequest => {
                     let end_request_rec = EndRequestRec::from_header(&header, stream).await?;
@@ -326,12 +342,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin, M: Mode> Client<S, M> {
                     response.stdout = if stdout.is_empty() {
                         None
                     } else {
-                        Some(stdout)
+                        Some(stdout.freeze())
                     };
                     response.stderr = if stderr.is_empty() {
                         None
                     } else {
-                        Some(stderr)
+                        Some(stderr.freeze())
                     };
 
                     return Ok(response);
@@ -339,9 +355,24 @@ impl<S: AsyncRead + AsyncWrite + Unpin, M: Mode> Client<S, M> {
                 r#type => {
                     return Err(ClientError::UnknownRequestType {
                         request_type: r#type,
-                    })
+                    });
                 }
             }
         }
+    }
+}
+
+/// Добавляю реализацию deref в stream потому что Client ведет себя по большей части просто как stream.
+impl<S, M> Deref for Client<S, M> {
+    type Target = S;
+
+    fn deref(&self) -> &Self::Target {
+        &self.stream
+    }
+}
+
+impl<S, M> DerefMut for Client<S, M> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.stream
     }
 }

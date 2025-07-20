@@ -21,3 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add ability to custom insertion in Params ([#18](https://github.com/jmjoy/fastcgi-client-rs/pull/18))
 - Update workflow configurations to use ubuntu-latest ([#21](https://github.com/jmjoy/fastcgi-client-rs/pull/21))
 - Refactor execute_once_stream function signature and remove redundant comment in conn.rs
+
+
+## [0.11.0]
+
+- Fixed a stack overflow on windows (MAX_LENGTH allocated in the stack moved to the heap).

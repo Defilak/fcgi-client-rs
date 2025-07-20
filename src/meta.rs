@@ -18,9 +18,10 @@
 //! for parsing and generating FastCGI protocol messages.
 
 use crate::{
-    error::{ClientError, ClientResult},
     Params,
+    error::{ClientError, ClientResult},
 };
+use bytes::{BufMut, Bytes, BytesMut};
 use std::{
     borrow::Cow,
     cmp::min,
@@ -39,7 +40,7 @@ pub(crate) const MAX_LENGTH: usize = 0xffff;
 pub(crate) const HEADER_LEN: usize = size_of::<Header>();
 
 /// FastCGI request types as defined in the protocol specification.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 #[repr(u8)]
 pub enum RequestType {
     /// Begin request record type
@@ -91,7 +92,7 @@ impl RequestType {
 
 impl Display for RequestType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-        Display::fmt(&(self.clone() as u8), f)
+        write!(f, "{}", *self as u8)
     }
 }
 
@@ -122,7 +123,10 @@ impl Header {
     /// * `content` - The content to write
     /// * `before_write` - Optional callback to modify header before writing
     pub(crate) async fn write_to_stream_batches<F, R, W>(
-        r#type: RequestType, request_id: u16, writer: &mut W, content: &mut R,
+        r#type: RequestType,
+        request_id: u16,
+        writer: &mut W,
+        content: &mut R,
         before_write: Option<F>,
     ) -> io::Result<()>
     where
@@ -130,7 +134,7 @@ impl Header {
         R: AsyncRead + Unpin,
         W: AsyncWrite + Unpin,
     {
-        let mut buf = vec![0; MAX_LENGTH];
+        let mut buf = vec![0u8; MAX_LENGTH];
         let mut had_written = false;
 
         loop {
@@ -177,22 +181,25 @@ impl Header {
     /// * `writer` - The writer to write to
     /// * `content` - The content to write
     async fn write_to_stream<W: AsyncWrite + Unpin>(
-        self, writer: &mut W, content: &[u8],
+        self,
+        writer: &mut W,
+        content: &[u8],
     ) -> io::Result<()> {
-        let mut buf: Vec<u8> = Vec::new();
-        buf.push(self.version);
-        buf.push(self.r#type as u8);
-        buf.write_u16(self.request_id).await?;
-        buf.write_u16(self.content_length).await?;
-        buf.push(self.padding_length);
-        buf.push(self.reserved);
+        let mut buf = BytesMut::with_capacity(HEADER_LEN);
+        buf.put_u8(self.version);
+        buf.put_u8(self.r#type as u8);
+        buf.put_u16(self.request_id);
+        buf.put_u16(self.content_length);
+        buf.put_u8(self.padding_length);
+        buf.put_u8(self.reserved);
 
-        writer.write_all(&buf).await?;
+        writer.write_all_buf(&mut buf).await?;
         writer.write_all(content).await?;
-        writer
-            .write_all(&vec![0; self.padding_length as usize])
-            .await?;
-
+        
+        if self.padding_length > 0 {
+            let padding = [0u8; 7]; // Max padding is 7 bytes
+            writer.write_all(&padding[..self.padding_length as usize]).await?;
+        }
         Ok(())
     }
 
@@ -231,13 +238,14 @@ impl Header {
     ///
     /// * `reader` - The reader to read from
     pub(crate) async fn read_content_from_stream<R: AsyncRead + Unpin>(
-        &self, reader: &mut R,
-    ) -> io::Result<Vec<u8>> {
-        let mut buf = vec![0; self.content_length as usize];
+        &self,
+        reader: &mut R,
+    ) -> io::Result<Bytes> {
+        let mut buf = BytesMut::zeroed(self.content_length as usize);
         reader.read_exact(&mut buf).await?;
-        let mut padding_buf = vec![0; self.padding_length as usize];
+        let mut padding_buf = BytesMut::zeroed(self.padding_length as usize);
         reader.read_exact(&mut padding_buf).await?;
-        Ok(buf)
+        Ok(buf.freeze())
     }
 }
 
@@ -281,23 +289,24 @@ impl BeginRequest {
     }
 
     /// Converts the begin request to bytes.
-    pub(crate) async fn to_content(&self) -> io::Result<Vec<u8>> {
-        let mut buf: Vec<u8> = Vec::new();
-        buf.write_u16(self.role as u16).await?;
-        buf.push(self.flags);
-        buf.extend_from_slice(&self.reserved);
-        Ok(buf)
+    pub(crate) fn to_content(&self) -> BytesMut {
+        let mut buf = BytesMut::with_capacity(8);
+        buf.put_u16(self.role as u16);
+        buf.put_u8(self.flags);
+        buf.put_slice(&self.reserved);
+        buf
     }
 }
 
 /// Complete begin request record with header and content.
+#[derive(Debug)]
 pub(crate) struct BeginRequestRec {
     /// The FastCGI header
     pub(crate) header: Header,
     /// The begin request data
     pub(crate) begin_request: BeginRequest,
     /// The serialized content
-    pub(crate) content: Vec<u8>,
+    pub(crate) content: BytesMut,
 }
 
 impl BeginRequestRec {
@@ -308,15 +317,15 @@ impl BeginRequestRec {
     /// * `request_id` - The request ID
     /// * `role` - The role of the application
     /// * `keep_alive` - Whether to keep the connection alive
-    pub(crate) async fn new(request_id: u16, role: Role, keep_alive: bool) -> io::Result<Self> {
+    pub(crate) fn new(request_id: u16, role: Role, keep_alive: bool) -> Self {
         let begin_request = BeginRequest::new(role, keep_alive);
-        let content = begin_request.to_content().await?;
+        let content = begin_request.to_content();
         let header = Header::new(RequestType::BeginRequest, request_id, &content);
-        Ok(Self {
+        Self {
             header,
             begin_request,
             content,
-        })
+        }
     }
 
     /// Writes the begin request record to a stream.
@@ -325,21 +334,10 @@ impl BeginRequestRec {
     ///
     /// * `writer` - The writer to write to
     pub(crate) async fn write_to_stream<W: AsyncWrite + Unpin>(
-        self, writer: &mut W,
+        self,
+        writer: &mut W,
     ) -> io::Result<()> {
         self.header.write_to_stream(writer, &self.content).await
-    }
-}
-
-impl Debug for BeginRequestRec {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-        Debug::fmt(
-            &format!(
-                "BeginRequestRec {{header: {:?}, begin_request: {:?}}}",
-                self.header, self.begin_request
-            ),
-            f,
-        )
     }
 }
 
@@ -369,13 +367,19 @@ impl ParamLength {
     }
 
     /// Converts the parameter length to bytes.
-    pub async fn content(self) -> io::Result<Vec<u8>> {
-        let mut buf: Vec<u8> = Vec::new();
+    pub fn content(self) -> BytesMut {
         match self {
-            ParamLength::Short(l) => buf.push(l),
-            ParamLength::Long(l) => buf.write_u32(l).await?,
+            ParamLength::Short(l) => {
+                let mut buf = BytesMut::with_capacity(1);
+                buf.put_u8(l);
+                buf
+            }
+            ParamLength::Long(l) => {
+                let mut buf = BytesMut::with_capacity(4);
+                buf.put_u32(l);
+                buf
+            }
         }
-        Ok(buf)
     }
 }
 
@@ -410,19 +414,18 @@ impl<'a> ParamPair<'a> {
         }
     }
 
-    /// Writes the parameter pair to a stream.
+    /// Writes the parameter pair to a buffer.
     ///
     /// # Arguments
     ///
-    /// * `writer` - The writer to write to
-    async fn write_to_stream<W: AsyncWrite + Unpin>(&self, writer: &mut W) -> io::Result<()> {
-        writer.write_all(&self.name_length.content().await?).await?;
-        writer
-            .write_all(&self.value_length.content().await?)
-            .await?;
-        writer.write_all(self.name_data.as_bytes()).await?;
-        writer.write_all(self.value_data.as_bytes()).await?;
-        Ok(())
+    /// * `buf` - The buffer to write to
+    fn write_to_buf(&self, buf: &mut BytesMut) {
+        let name_len = self.name_length.content();
+        buf.extend_from_slice(&name_len);
+        let value_len = self.value_length.content();
+        buf.extend_from_slice(&value_len);
+        buf.extend_from_slice(self.name_data.as_bytes());
+        buf.extend_from_slice(self.value_data.as_bytes());
     }
 }
 
@@ -448,14 +451,14 @@ impl<'a> ParamPairs<'a> {
     }
 
     /// Converts the parameter pairs to bytes.
-    pub(crate) async fn to_content(&self) -> io::Result<Vec<u8>> {
-        let mut buf: Vec<u8> = Vec::new();
+    pub(crate) fn to_content(&self) -> Bytes {
+        let mut buf = BytesMut::new();
 
         for param_pair in self.iter() {
-            param_pair.write_to_stream(&mut buf).await?;
+            param_pair.write_to_buf(&mut buf);
         }
 
-        Ok(buf)
+        buf.freeze()
     }
 }
 
@@ -547,11 +550,12 @@ impl EndRequestRec {
     /// * `header` - The FastCGI header
     /// * `reader` - The reader to read content from
     pub(crate) async fn from_header<R: AsyncRead + Unpin>(
-        header: &Header, reader: &mut R,
+        header: &Header,
+        reader: &mut R,
     ) -> io::Result<Self> {
         let header = header.clone();
-        let content = &*header.read_content_from_stream(reader).await?;
-        Ok(Self::new_from_buf(header, content))
+        let content = header.read_content_from_stream(reader).await?;
+        Ok(Self::new_from_buf(header, &content))
     }
 
     /// Creates an end request record from a header and buffer.

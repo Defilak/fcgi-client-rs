@@ -43,9 +43,9 @@ use crate::{
 #[non_exhaustive]
 pub struct Response {
     /// The stdout output from the FastCGI server
-    pub stdout: Option<Vec<u8>>,
+    pub stdout: Option<Bytes>,
     /// The stderr output from the FastCGI server
-    pub stderr: Option<Vec<u8>>,
+    pub stderr: Option<Bytes>,
 }
 
 impl Debug for Response {

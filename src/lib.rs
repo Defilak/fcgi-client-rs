@@ -12,17 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![doc = include_str!("../README.md")]
-
 pub mod client;
 pub mod conn;
 mod error;
-mod meta;
+pub mod meta;
 pub mod params;
 pub mod request;
 pub mod response;
-
-/// Re Export StreamExt for .next support
-pub use futures_util::stream::StreamExt;
 
 pub use crate::{client::Client, error::*, params::Params, request::Request, response::Response};

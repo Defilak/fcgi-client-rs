@@ -1,10 +1,26 @@
-# fastcgi-client-rs
+# fcgi-client-rs
 
-[![Rust](https://github.com/jmjoy/fastcgi-client-rs/actions/workflows/rust.yml/badge.svg)](https://github.com/jmjoy/fastcgi-client-rs/actions/workflows/rust.yml)
-[![Crate](https://img.shields.io/crates/v/fastcgi-client.svg)](https://crates.io/crates/fastcgi-client)
-[![API](https://docs.rs/fastcgi-client/badge.svg)](https://docs.rs/fastcgi-client)
+[![Crate](https://img.shields.io/crates/v/fcgi-client.svg)](https://crates.io/crates/fcgi-client)
 
-Fastcgi client implemented for Rust, power by [tokio](https://crates.io/crates/tokio).
+## Description
+
+### RU
+Это форк библиотеки [fastcgi-client-rs](https://github.com/jmjoy/fastcgi-client-rs) от jmjoy.  
+Основые отличия от оригинала:
+
+-   Исправлена ошибка с переполнением стека на windows (MAX_LENGTH выделеный в стеке перенесен в кучу).
+-   Использования Vec для сборки данных заменены на bytes::Bytes.
+-   Код обновлен под Rust 2021.
+-   Обновлены зависимости (и удалены лишние).
+
+### EN
+This is a fork of the [fastcgi-client-rs](https://github.com/jmjoy/fastcgi-client-rs) library by jmjoy.  
+Main differences from the original:
+
+- Fixed a stack overflow on windows (MAX_LENGTH allocated in the stack moved to the heap).
+- All cases of using Vec are replaced with bytes::Bytes.
+- Code updated for Rust 2021.
+- Updated depending on (and removed unnecessary ones).
 
 ## Installation
 
@@ -97,4 +113,4 @@ async fn main() {
 
 ## License
 
-[Apache-2.0](https://github.com/jmjoy/fastcgi-client-rs/blob/master/LICENSE).
+[Apache-2.0](https://github.com/Defilak/fcgi-client-rs/blob/master/LICENSE).
