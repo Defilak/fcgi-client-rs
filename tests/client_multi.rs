@@ -67,12 +67,12 @@ async fn single() {
             .await
             .unwrap();
 
-        let stdout = String::from_utf8(output.stdout.unwrap_or(Default::default())).unwrap();
+        let stdout = String::from_utf8(output.stdout.unwrap_or(Default::default()).to_vec()).unwrap();
         assert!(stdout.contains("Content-type: text/html; charset=UTF-8"));
         assert!(stdout.contains("\r\n\r\n"));
         assert!(stdout.contains("1234"));
 
-        let stderr = String::from_utf8(output.stderr.unwrap_or(Default::default())).unwrap();
+        let stderr = String::from_utf8(output.stderr.unwrap_or(Default::default()).to_vec()).unwrap();
         assert!(stderr.contains("PHP message: PHP Fatal error:  Uncaught Exception: TEST"));
     }
 }

@@ -18,10 +18,10 @@
 //! for parsing and generating FastCGI protocol messages.
 
 use crate::{
-    Params,
     error::{ClientError, ClientResult},
+    Params,
 };
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::{
     borrow::Cow,
     cmp::min,
@@ -123,10 +123,7 @@ impl Header {
     /// * `content` - The content to write
     /// * `before_write` - Optional callback to modify header before writing
     pub(crate) async fn write_to_stream_batches<F, R, W>(
-        r#type: RequestType,
-        request_id: u16,
-        writer: &mut W,
-        content: &mut R,
+        r#type: RequestType, request_id: u16, writer: &mut W, content: &mut R,
         before_write: Option<F>,
     ) -> io::Result<()>
     where
@@ -181,24 +178,18 @@ impl Header {
     /// * `writer` - The writer to write to
     /// * `content` - The content to write
     async fn write_to_stream<W: AsyncWrite + Unpin>(
-        self,
-        writer: &mut W,
-        content: &[u8],
+        self, writer: &mut W, content: &[u8],
     ) -> io::Result<()> {
-        let mut buf = BytesMut::with_capacity(HEADER_LEN);
-        buf.put_u8(self.version);
-        buf.put_u8(self.r#type as u8);
-        buf.put_u16(self.request_id);
-        buf.put_u16(self.content_length);
-        buf.put_u8(self.padding_length);
-        buf.put_u8(self.reserved);
+        let mut buf: Bytes = (&self).into();
 
         writer.write_all_buf(&mut buf).await?;
         writer.write_all(content).await?;
-        
+
         if self.padding_length > 0 {
             let padding = [0u8; 7]; // Max padding is 7 bytes
-            writer.write_all(&padding[..self.padding_length as usize]).await?;
+            writer
+                .write_all(&padding[..self.padding_length as usize])
+                .await?;
         }
         Ok(())
     }
@@ -209,27 +200,9 @@ impl Header {
     ///
     /// * `reader` - The reader to read from
     pub(crate) async fn new_from_stream<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<Self> {
-        let mut buf: [u8; HEADER_LEN] = [0; HEADER_LEN];
+        let mut buf = BytesMut::zeroed(HEADER_LEN);
         reader.read_exact(&mut buf).await?;
-
-        Ok(Self::new_from_buf(&buf))
-    }
-
-    /// Creates a new header from a buffer.
-    ///
-    /// # Arguments
-    ///
-    /// * `buf` - The buffer containing header data
-    #[inline]
-    pub(crate) fn new_from_buf(buf: &[u8; HEADER_LEN]) -> Self {
-        Self {
-            version: buf[0],
-            r#type: RequestType::from_u8(buf[1]),
-            request_id: be_buf_to_u16(&buf[2..4]),
-            content_length: be_buf_to_u16(&buf[4..6]),
-            padding_length: buf[6],
-            reserved: buf[7],
-        }
+        Ok(Self::from(buf))
     }
 
     /// Reads content from a stream based on the header's content length.
@@ -238,14 +211,44 @@ impl Header {
     ///
     /// * `reader` - The reader to read from
     pub(crate) async fn read_content_from_stream<R: AsyncRead + Unpin>(
-        &self,
-        reader: &mut R,
-    ) -> io::Result<Bytes> {
+        &self, reader: &mut R,
+    ) -> io::Result<BytesMut> {
         let mut buf = BytesMut::zeroed(self.content_length as usize);
         reader.read_exact(&mut buf).await?;
         let mut padding_buf = BytesMut::zeroed(self.padding_length as usize);
         reader.read_exact(&mut padding_buf).await?;
-        Ok(buf.freeze())
+        Ok(buf)
+    }
+}
+
+impl Into<Bytes> for &Header {
+    fn into(self) -> Bytes {
+        let mut buf = BytesMut::with_capacity(HEADER_LEN);
+        buf.put_u8(self.version);
+        buf.put_u8(self.r#type as u8);
+        buf.put_u16(self.request_id);
+        buf.put_u16(self.content_length);
+        buf.put_u8(self.padding_length);
+        buf.put_u8(self.reserved);
+        buf.freeze()
+    }
+}
+
+impl From<BytesMut> for Header {
+    /// Creates a new header from a buffer.
+    ///
+    /// # Arguments
+    ///
+    /// * `buf` - The buffer containing header data
+    fn from(mut buf: BytesMut) -> Self {
+        Self {
+            version: buf.get_u8(),
+            r#type: RequestType::from_u8(buf.get_u8()),
+            request_id: buf.get_u16(),
+            content_length: buf.get_u16(),
+            padding_length: buf.get_u8(),
+            reserved: buf.get_u8(),
+        }
     }
 }
 
@@ -334,8 +337,7 @@ impl BeginRequestRec {
     ///
     /// * `writer` - The writer to write to
     pub(crate) async fn write_to_stream<W: AsyncWrite + Unpin>(
-        self,
-        writer: &mut W,
+        self, writer: &mut W,
     ) -> io::Result<()> {
         self.header.write_to_stream(writer, &self.content).await
     }
@@ -532,6 +534,21 @@ pub struct EndRequest {
     reserved: [u8; 3],
 }
 
+impl From<BytesMut> for EndRequest {
+    fn from(mut buf: BytesMut) -> Self {
+        let app_status = buf.get_u32();
+        let protocol_status = ProtocolStatus::from_u8(buf.get_u8());
+        let mut reserved = [0u8; 3];
+        buf.copy_to_slice(&mut reserved);
+
+        Self {
+            app_status,
+            protocol_status,
+            reserved,
+        }
+    }
+}
+
 /// Complete end request record with header and content.
 #[derive(Debug)]
 pub(crate) struct EndRequestRec {
@@ -550,12 +567,11 @@ impl EndRequestRec {
     /// * `header` - The FastCGI header
     /// * `reader` - The reader to read content from
     pub(crate) async fn from_header<R: AsyncRead + Unpin>(
-        header: &Header,
-        reader: &mut R,
+        header: &Header, reader: &mut R,
     ) -> io::Result<Self> {
         let header = header.clone();
         let content = header.read_content_from_stream(reader).await?;
-        Ok(Self::new_from_buf(header, &content))
+        Ok(Self::new_from_buf(header, content))
     }
 
     /// Creates an end request record from a header and buffer.
@@ -564,27 +580,10 @@ impl EndRequestRec {
     ///
     /// * `header` - The FastCGI header
     /// * `buf` - The buffer containing the end request data
-    pub(crate) fn new_from_buf(header: Header, buf: &[u8]) -> Self {
-        let app_status = u32::from_be_bytes(<[u8; 4]>::try_from(&buf[0..4]).unwrap());
-        let protocol_status =
-            ProtocolStatus::from_u8(u8::from_be_bytes(<[u8; 1]>::try_from(&buf[4..5]).unwrap()));
-        let reserved = <[u8; 3]>::try_from(&buf[5..8]).unwrap();
+    pub(crate) fn new_from_buf(header: Header, buf: BytesMut) -> Self {
         Self {
             header,
-            end_request: EndRequest {
-                app_status,
-                protocol_status,
-                reserved,
-            },
+            end_request: EndRequest::from(buf),
         }
     }
-}
-
-/// Converts big-endian bytes to u16.
-///
-/// # Arguments
-///
-/// * `buf` - The buffer containing the bytes
-fn be_buf_to_u16(buf: &[u8]) -> u16 {
-    u16::from_be_bytes(<[u8; 2]>::try_from(buf).unwrap())
 }

@@ -110,15 +110,14 @@ impl<S: AsyncRead + Unpin> ResponseStream<S> {
             return None;
         }
         let buf = self.buf.split_to(HEADER_LEN);
-        let header = (&buf as &[u8]).try_into().expect("failed to read header");
-        Some(Header::new_from_buf(header))
+        Some(Header::from(buf))
     }
 
     /// Reads content from the buffer based on the current header.
     ///
     /// Returns `None` if there isn't enough data in the buffer.
     #[inline]
-    fn read_content(&mut self) -> Option<Bytes> {
+    fn read_content(&mut self) -> Option<BytesMut> {
         let header = self.header.as_ref().unwrap();
         let block_length = header.content_length as usize + header.padding_length as usize;
         if self.buf.len() < block_length {
@@ -127,7 +126,7 @@ impl<S: AsyncRead + Unpin> ResponseStream<S> {
         let content = self.buf.split_to(header.content_length as usize);
         let _ = self.buf.split_to(header.padding_length as usize);
         self.header = None;
-        Some(content.freeze())
+        Some(content)
     }
 
     /// Processes a complete FastCGI message from the buffer.
@@ -148,12 +147,12 @@ impl<S: AsyncRead + Unpin> ResponseStream<S> {
         match header.r#type.clone() {
             RequestType::Stdout => {
                 if let Some(data) = self.read_content() {
-                    return Ok(Some(Content::Stdout(data)));
+                    return Ok(Some(Content::Stdout(data.freeze())));
                 }
             }
             RequestType::Stderr => {
                 if let Some(data) = self.read_content() {
-                    return Ok(Some(Content::Stderr(data)));
+                    return Ok(Some(Content::Stderr(data.freeze())));
                 }
             }
             RequestType::EndRequest => {
@@ -162,7 +161,7 @@ impl<S: AsyncRead + Unpin> ResponseStream<S> {
                     return Ok(None);
                 };
 
-                let end = EndRequestRec::new_from_buf(header, &data);
+                let end = EndRequestRec::new_from_buf(header, data);
                 debug!(id = self.id, ?end, "Receive from stream.");
 
                 self.eof = true;

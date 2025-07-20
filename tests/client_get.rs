@@ -62,7 +62,7 @@ async fn test_client<S: AsyncRead + AsyncWrite + Unpin>(client: Client<S, ShortC
         .unwrap();
 
     assert_eq!(
-        String::from_utf8(output.stdout.unwrap_or(Default::default())).unwrap(),
+        String::from_utf8(output.stdout.unwrap_or(Default::default()).to_vec()).unwrap(),
         "X-Powered-By: PHP/7.1.30\r\nContent-type: text/html; charset=UTF-8\r\n\r\nhello"
     );
     assert_eq!(output.stderr, None);
